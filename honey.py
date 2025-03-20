@@ -1,5 +1,5 @@
 import telegram
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram.ext import Updater, CommandHandler, MessageHandler, filters
 import subprocess
 import os
 
@@ -82,7 +82,7 @@ def execute_command(update, context):
 
 # Add handlers
 dp.add_handler(CommandHandler("start", start))
-dp.add_handler(MessageHandler(Filters.text & ~Filters.command, execute_command))
+dp.add_handler(MessageHandler(filters.text & ~filters.command, execute_command))
 
 # Start the bot
 updater.start_polling()
