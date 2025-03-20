@@ -21,7 +21,7 @@ bots_collection = db["bots"]
 # Constants
 MAIN_OWNER_ID = "1094941160"  # Replace with @h_oneysingh's Telegram ID
 LOG_GROUP_ID = -1002335903626  # Replace with your log group ID
-MAIN_BOT_TOKEN = "7891611632:AAGvB8rwJbhh7avJyCH0YhwbIPsp045wwtM"  # Replace with your main bot token
+MAIN_BOT_TOKEN = "7891611632:AAGvB8rwJbhh7avJyCH0YhwbIPsp045wwtM"  # Replace with a valid token from BotFather
 
 # Store runtime data
 user_data = {}
@@ -91,7 +91,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     bot_data = bots_collection.find_one({"token": context.bot.token})
     chat_id = update.message.chat_id
     
-    # Main Owner
     if user_id == MAIN_OWNER_ID:
         stats = (
             f"Bot Stats:\n"
@@ -115,7 +114,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         await update.message.reply_text(commands)
     
-    # Cloned Bot Owner (Semi-Owner disguised as Owner)
     elif bot_data and user_id == bot_data["owner_id"]:
         commands = (
             f"Welcome, Bot Owner!\n\n"
@@ -131,7 +129,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         await update.message.reply_text(commands)
     
-    # Sudo User
     elif bot_data and user_id in bot_data.get("sudo_users", []):
         commands = (
             "Welcome, Sudo User!\n\n"
@@ -144,7 +141,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         await update.message.reply_text(commands)
     
-    # Regular User
     else:
         commands = (
             "Welcome!\n\n"
@@ -343,7 +339,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     message = " ".join(context.args)
-    for token, app in bot_instances.items():
+    for token, app in list(bot_instances.items()):
         try:
             await app.bot.send_message(chat_id=LOG_GROUP_ID, text=f"Broadcast: {message}")
             await log_to_group(context, f"Broadcasted to bot {token}: {message}")
@@ -380,7 +376,7 @@ def setup_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("show_owner", show_owner))
     application.add_handler(CommandHandler("broadcast", broadcast))
 
-def main() -> None:
+async def run_main_app():
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
     setup_handlers(main_app)
     bot_instances[MAIN_BOT_TOKEN] = main_app
@@ -391,6 +387,7 @@ def main() -> None:
         upsert=True
     )
     
+    # Start cloned bots
     for bot in bots_collection.find({"token": {"$ne": MAIN_BOT_TOKEN}}):
         try:
             app = Application.builder().token(bot["token"]).build()
@@ -401,7 +398,10 @@ def main() -> None:
         except Exception as e:
             logger.error(f"Failed to auto-start bot {bot['token']}: {str(e)}")
     
-    main_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await main_app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+def main():
+    asyncio.run(run_main_app())
 
 if __name__ == "__main__":
     main()
