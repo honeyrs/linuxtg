@@ -5,7 +5,7 @@ import os
 import shlex
 
 # Replace with your bot token from BotFather
-TOKEN = "8132664143:AAGrAKwg2zZw2YUzqe1UCO1JlqPr3W_weUk"
+TOKEN = "8132664143:AAEpsAAoaEPdqkQcmEbzU9IXCEaxsottWZQ"
 
 # Store the state of which file is being "edited" by nano (per user)
 nano_state = {}
