@@ -5,7 +5,7 @@ import os
 import shlex
 
 # Replace with your bot token from BotFather
-TOKEN = "8132664143:AAGrAKwg2zZw2YUzqe1UCO1JlqPr3W_weUk"
+TOKEN = "8132664143:AAHbaq378Q7Pw5a5bQf1xbLXmQzAZpOb-B8"
 
 # Replace with your log channel ID (optional, set to None if not used)
 LOG_CHANNEL_ID = None  # e.g., -1001234567890
