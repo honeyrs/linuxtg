@@ -21,7 +21,7 @@ bots_collection = db["bots"]
 # Constants
 MAIN_OWNER_ID = "1094941160"  # @h_oneysingh's Telegram ID
 LOG_GROUP_ID = -1002335903626  # Your log group ID
-MAIN_BOT_TOKEN = "7891611632:AAGvB8rwJbhh7avJyCH0YhwbIPsp045wwtM"  # Valid token
+MAIN_BOT_TOKEN = "7891611632:AAFptf8qIr1ZOeYzghGVnPpSOpOtq8U8Z6Q"  # Valid token
 
 # Store runtime data
 user_data = {}
