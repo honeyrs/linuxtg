@@ -28,20 +28,19 @@ user_data = {}
 ssh_sessions = {}
 bot_instances = {}  # {bot_token: Application}
 port_forwards = {}  # {chat_id: {"thread": Thread, "port": int, "process": Process}}
+clone_attempts = {}  # {token: attempts}
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def log_to_group(context: ContextTypes.DEFAULT_TYPE, message: str):
-    """Log messages to the specified group"""
     try:
         await context.bot.send_message(chat_id=LOG_GROUP_ID, text=message[:4000])
     except Exception as e:
         logger.error(f"Failed to log to group: {str(e)}")
 
-def setup_web_editor(ssh_client, chat_id):
-    """Setup code-server on the remote server and start port forwarding"""
+def setup_web_editor(ssh_client, chat_id, file_path):
     try:
         port = random.randint(8000, 9000)
         stdin, stdout, stderr = ssh_client.exec_command(f"netstat -tuln | grep :{port}")
@@ -50,10 +49,10 @@ def setup_web_editor(ssh_client, chat_id):
         
         install_cmd = (
             "curl -fsSL https://code-server.dev/install.sh | sh -s -- --prefix=/tmp/code-server && "
-            f"/tmp/code-server/bin/code-server --port {port} --auth none --host 0.0.0.0 /home/user &"
+            f"/tmp/code-server/bin/code-server --port {port} --auth none --host 0.0.0.0 {file_path} &"
         )
         ssh_client.exec_command(install_cmd)
-        time.sleep(2)
+        time.sleep(3)
         
         def forward_port():
             ssh_cmd = (
@@ -73,14 +72,11 @@ def setup_web_editor(ssh_client, chat_id):
         return None, str(e)
 
 def cleanup_web_editor(ssh_client, chat_id):
-    """Cleanup code-server and port forwarding"""
     try:
         if chat_id in port_forwards:
-            # Kill code-server process
             ssh_client.exec_command("pkill -f code-server")
             ssh_client.exec_command("rm -rf /tmp/code-server")
             
-            # Terminate port forwarding
             if "process" in port_forwards[chat_id] and port_forwards[chat_id]["process"]:
                 try:
                     port_forwards[chat_id]["process"].terminate()
@@ -88,20 +84,16 @@ def cleanup_web_editor(ssh_client, chat_id):
                 except Exception:
                     port_forwards[chat_id]["process"].kill()
             
-            # Ensure thread cleanup
             if "thread" in port_forwards[chat_id]:
                 port_forwards[chat_id]["thread"].join(timeout=2)
             
-            # Remove from tracking
             del port_forwards[chat_id]
     except Exception as e:
         logger.error(f"Cleanup error for {chat_id}: {str(e)}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Customized start command based on user role"""
     user_id = str(update.effective_user.id)
     bot_data = bots_collection.find_one({"token": context.bot.token})
-    chat_id = update.message.chat_id
     
     if user_id == MAIN_OWNER_ID:
         stats = (
@@ -115,7 +107,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "Commands:\n"
             "/ssh username@ip - Start an SSH session\n"
             "/nano <file_path> - Edit files in browser\n"
-            "/exit - Disconnect SSH and cleanup\n"
+            "/logout - Disconnect SSH and cleanup\n"
             "/clone <new_bot_token> - Clone this bot\n"
             "/addsudo <user_id> - Add sudo user\n"
             "/removesudo <user_id> - Remove sudo user\n"
@@ -132,7 +124,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "Commands:\n"
             "/ssh username@ip - Start an SSH session\n"
             "/nano <file_path> - Edit files in browser\n"
-            "/exit - Disconnect SSH and cleanup\n"
+            "/logout - Disconnect SSH and cleanup\n"
             "/addsudo <user_id> - Add sudo user (for this bot)\n"
             "/removesudo <user_id> - Remove sudo user (for this bot)\n"
             "/show_owner - Show this bot's owner\n"
@@ -147,7 +139,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "Commands:\n"
             "/ssh username@ip - Start an SSH session\n"
             "/nano <file_path> - Edit files in browser\n"
-            "/exit - Disconnect SSH and cleanup\n"
+            "/logout - Disconnect SSH and cleanup\n"
             "/clone <new_bot_token> - Clone this bot\n"
             "/cancel - Cancel current session"
         )
@@ -159,7 +151,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "Commands:\n"
             "/ssh username@ip - Start an SSH session\n"
             "/nano <file_path> - Edit files in browser\n"
-            "/exit - Disconnect SSH and cleanup\n"
+            "/logout - Disconnect SSH and cleanup\n"
             "/clone <new_bot_token> - Clone this bot\n"
             "/cancel - Cancel current session"
         )
@@ -221,7 +213,7 @@ async def password_response(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             {"$set": {f"ssh_sessions.{chat_id}": {"username": username, "ip": ip}}},
             upsert=True
         )
-        await update.message.reply_text(f"Connected to {username}@{ip}! Send commands or use /exit.")
+        await update.message.reply_text(f"Connected to {username}@{ip}! Send commands or use /logout.")
         await log_to_group(context, f"User {update.effective_user.id} connected to {username}@{ip}")
         return TERMINAL
     except Exception as e:
@@ -238,30 +230,25 @@ async def terminal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     command = update.message.text.strip()
     ssh_client = ssh_sessions[chat_id]
     
-    if command.lower() == "/exit":
-        # Clean up web editor if it exists
+    if command.lower() == "/logout":
         cleanup_web_editor(ssh_client, chat_id)
-        
-        # Close SSH connection
         try:
             ssh_client.close()
         except Exception as e:
             logger.error(f"Error closing SSH client: {str(e)}")
             
-        # Remove session data
         if chat_id in ssh_sessions:
             del ssh_sessions[chat_id]
         if chat_id in user_data:
             del user_data[chat_id]
             
-        # Update MongoDB
         bots_collection.update_one(
             {"token": context.bot.token},
             {"$unset": {f"ssh_sessions.{chat_id}": ""}}
         )
         
-        await update.message.reply_text("Disconnected from VPS. All resources cleaned up.")
-        await log_to_group(context, f"User {update.effective_user.id} disconnected and cleaned up.")
+        await update.message.reply_text("Logged out from VPS. All resources cleaned up.")
+        await log_to_group(context, f"User {update.effective_user.id} logged out and cleaned up.")
         return ConversationHandler.END
     
     if command.startswith("/nano "):
@@ -270,7 +257,12 @@ async def terminal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("Usage: /nano <file_path>")
             return TERMINAL
         
-        port, error = setup_web_editor(ssh_client, chat_id)
+        stdin, stdout, stderr = ssh_client.exec_command(f"test -f {file_path} && echo exists")
+        if not stdout.read().decode().strip():
+            await update.message.reply_text(f"File {file_path} does not exist on the server.")
+            return TERMINAL
+        
+        port, error = setup_web_editor(ssh_client, chat_id, file_path)
         if error:
             await update.message.reply_text(f"Failed to setup editor: {error}")
             return TERMINAL
@@ -278,7 +270,7 @@ async def terminal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         link = f"http://localhost:{port}"
         await update.message.reply_text(
             f"Open this link in your browser to edit {file_path}:\n{link}\n"
-            "Save your changes in the editor. Use /exit to disconnect and cleanup."
+            "Save your changes in the editor. Use /logout to disconnect and cleanup."
         )
         await log_to_group(context, f"User {update.effective_user.id} opened editor for {file_path} at {link}")
         return TERMINAL
@@ -301,26 +293,48 @@ async def clone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     new_token = context.args[0]
-    try:
-        new_app = Application.builder().token(new_token).build()
-        setup_handlers(new_app)
-        bot_instances[new_token] = new_app
-        
-        bots_collection.insert_one({
-            "token": new_token,
-            "owner_id": str(update.effective_user.id),
-            "sudo_users": [],
-            "ssh_sessions": {}
-        })
-        
-        await update.message.reply_text(f"Bot cloned with token {new_token}. Starting now...")
-        await log_to_group(context, f"User {update.effective_user.id} cloned bot with token {new_token}")
-        await new_app.initialize()
-        await new_app.start()
-    except Exception as e:
-        await update.message.reply_text(f"Failed to clone bot: {str(e)}")
-        if new_token in bot_instances:
-            del bot_instances[new_token]
+    
+    # Initialize attempt counter
+    clone_attempts[new_token] = clone_attempts.get(new_token, 0)
+    
+    async def attempt_start():
+        try:
+            new_app = Application.builder().token(new_token).build()
+            setup_handlers(new_app)
+            bot_instances[new_token] = new_app
+            
+            bots_collection.update_one(
+                {"token": new_token},
+                {"$set": {
+                    "owner_id": str(update.effective_user.id),
+                    "sudo_users": [],
+                    "ssh_sessions": {},
+                    "attempts": clone_attempts[new_token]
+                }},
+                upsert=True
+            )
+            
+            await new_app.initialize()
+            await new_app.start()
+            await update.message.reply_text(f"Bot cloned with token {new_token} and started!")
+            await log_to_group(context, f"User {update.effective_user.id} cloned bot with token {new_token}")
+            clone_attempts[new_token] = 0  # Reset attempts on success
+        except Exception as e:
+            clone_attempts[new_token] += 1
+            logger.error(f"Clone attempt {clone_attempts[new_token]} failed for {new_token}: {str(e)}")
+            if clone_attempts[new_token] >= 3:
+                bots_collection.delete_one({"token": new_token})
+                if new_token in bot_instances:
+                    del bot_instances[new_token]
+                del clone_attempts[new_token]
+                await update.message.reply_text(f"Failed to clone {new_token} after 3 attempts. Removed from database.")
+                await log_to_group(context, f"Removed {new_token} after 3 failed attempts.")
+            else:
+                await update.message.reply_text(f"Attempt {clone_attempts[new_token]} failed: {str(e)}. Retrying...")
+                await asyncio.sleep(5)  # Wait before retry
+                await attempt_start()
+
+    asyncio.create_task(attempt_start())
 
 async def addsudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_data = bots_collection.find_one({"token": context.bot.token})
@@ -408,53 +422,57 @@ def setup_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("broadcast", broadcast))
 
 async def run_all_bots():
-    # Initialize main bot
-    main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
-    setup_handlers(main_app)
-    bot_instances[MAIN_BOT_TOKEN] = main_app
-    
-    bots_collection.update_one(
-        {"token": MAIN_BOT_TOKEN},
-        {"$set": {"owner_id": MAIN_OWNER_ID, "sudo_users": [], "ssh_sessions": {}}},
-        upsert=True
-    )
-    
-    # Initialize cloned bots
-    cloned_tasks = []
-    for bot in bots_collection.find({"token": {"$ne": MAIN_BOT_TOKEN}}):
-        try:
-            app = Application.builder().token(bot["token"]).build()
-            setup_handlers(app)
-            bot_instances[bot["token"]] = app
-            cloned_tasks.append(app.initialize())
-            logger.info(f"Initialized cloned bot with token {bot['token']}")
-        except Exception as e:
-            logger.error(f"Failed to initialize bot {bot['token']}: {str(e)}")
-    
-    # Start all bots
-    await main_app.initialize()
-    await asyncio.gather(*cloned_tasks, return_exceptions=True)
-    
-    await main_app.start()
-    await asyncio.gather(*[app.start() for app in bot_instances.values() if app != main_app], return_exceptions=True)
-    
-    # Run the updater for the main bot
-    await main_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    
-    # Keep the loop running until interrupted
     try:
+        main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
+        setup_handlers(main_app)
+        bot_instances[MAIN_BOT_TOKEN] = main_app
+        
+        bots_collection.update_one(
+            {"token": MAIN_BOT_TOKEN},
+            {"$set": {"owner_id": MAIN_OWNER_ID, "sudo_users": [], "ssh_sessions": {}}},
+            upsert=True
+        )
+        
+        await main_app.initialize()
+        await main_app.start()
+        await main_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        # Load and start cloned bots
+        cloned_tasks = []
+        for bot in bots_collection.find({"token": {"$ne": MAIN_BOT_TOKEN}}):
+            try:
+                app = Application.builder().token(bot["token"]).build()
+                setup_handlers(app)
+                bot_instances[bot["token"]] = app
+                cloned_tasks.append(app.initialize())
+                cloned_tasks.append(app.start())
+                cloned_tasks.append(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
+                logger.info(f"Initialized and started cloned bot with token {bot['token']}")
+            except Exception as e:
+                logger.error(f"Failed to start cloned bot {bot['token']}: {str(e)}")
+        
+        await asyncio.gather(*cloned_tasks, return_exceptions=True)
+        
+        logger.info("All bots started successfully")
         while True:
             await asyncio.sleep(1)
-    except KeyboardInterrupt:
+    except Exception as e:
+        logger.error(f"Error in run_all_bots: {str(e)}")
+    finally:
         logger.info("Shutting down all bots...")
-        await main_app.updater.stop()
-        await main_app.stop()
-        await asyncio.gather(*[app.stop() for app in bot_instances.values() if app != main_app], return_exceptions=True)
-        await main_app.shutdown()
-        await asyncio.gather(*[app.shutdown() for app in bot_instances.values() if app != main_app], return_exceptions=True)
+        for token, app in list(bot_instances.items()):
+            try:
+                await app.updater.stop()
+                await app.stop()
+                await app.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down bot {token}: {str(e)}")
 
 async def main():
     await run_all_bots()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(f"Main execution error: {str(e)}")
