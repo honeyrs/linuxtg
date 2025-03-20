@@ -1,13 +1,13 @@
 import telegram
-from telegram.ext import Updater, CommandHandler, MessageHandler, filters
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 import subprocess
 import os
 
 # Replace with your bot token from BotFather
 TOKEN = "8132664143:AAGrAKwg2zZw2YUzqe1UCO1JlqPr3W_weUk"
 
-# Initialize the bot
-updater = Updater(token=TOKEN, use_context=True)
+# Initialize the bot (token as positional argument)
+updater = Updater(TOKEN)  # No 'token=' or 'use_context=True'
 dp = updater.dispatcher
 
 # Store the state of which file is being "edited" by nano (per user)
@@ -82,7 +82,7 @@ def execute_command(update, context):
 
 # Add handlers
 dp.add_handler(CommandHandler("start", start))
-dp.add_handler(MessageHandler(filters.text & ~filters.command, execute_command))
+dp.add_handler(MessageHandler(Filters.text & ~Filters.command, execute_command))
 
 # Start the bot
 updater.start_polling()
