@@ -13,15 +13,15 @@ import time
 SSH, TRUSTED, PASSWORD, TERMINAL = range(4)
 
 # MongoDB setup
-MONGO_URI = "mongodb+srv://testbindark:65I379zmYZzefXmm@clus.xg5n6.mongodb.net/"  # Replace with your MongoDB URI
+MONGO_URI = "mongodb+srv://testbindark:65I379zmYZzefXmm@clus.xg5n6.mongodb.net/"
 client = MongoClient(MONGO_URI)
 db = client["ssh_bot_db"]
 bots_collection = db["bots"]
 
 # Constants
-MAIN_OWNER_ID = "1094941160"  # Replace with @h_oneysingh's Telegram ID
-LOG_GROUP_ID = -1002335903626  # Replace with your log group ID
-MAIN_BOT_TOKEN = "7549968540:AAFqi_7DyheAzsM49_jSxQHMYvz0ynjjn7E"  # Replace with a valid token from BotFather
+MAIN_OWNER_ID = "1094941160"  # @h_oneysingh's Telegram ID
+LOG_GROUP_ID = -1002335903626  # Your log group ID
+MAIN_BOT_TOKEN = "7549968540:AAFqi_7DyheAzsM49_jSxQHMYvz0ynjjn7E"  # Valid token
 
 # Store runtime data
 user_data = {}
@@ -287,9 +287,12 @@ async def clone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         await update.message.reply_text(f"Bot cloned with token {new_token}. Starting now...")
         await log_to_group(context, f"User {update.effective_user.id} cloned bot with token {new_token}")
-        asyncio.create_task(new_app.run_polling(allowed_updates=Update.ALL_TYPES))
+        await new_app.initialize()
+        await new_app.start()
     except Exception as e:
         await update.message.reply_text(f"Failed to clone bot: {str(e)}")
+        if new_token in bot_instances:
+            del bot_instances[new_token]
 
 async def addsudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_data = bots_collection.find_one({"token": context.bot.token})
@@ -376,7 +379,8 @@ def setup_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("show_owner", show_owner))
     application.add_handler(CommandHandler("broadcast", broadcast))
 
-async def run_main_app():
+async def run_all_bots():
+    # Initialize main bot
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
     setup_handlers(main_app)
     bot_instances[MAIN_BOT_TOKEN] = main_app
@@ -387,21 +391,42 @@ async def run_main_app():
         upsert=True
     )
     
-    # Start cloned bots
+    # Initialize cloned bots
+    cloned_tasks = []
     for bot in bots_collection.find({"token": {"$ne": MAIN_BOT_TOKEN}}):
         try:
             app = Application.builder().token(bot["token"]).build()
             setup_handlers(app)
             bot_instances[bot["token"]] = app
-            asyncio.create_task(app.run_polling(allowed_updates=Update.ALL_TYPES))
-            logger.info(f"Auto-started cloned bot with token {bot['token']}")
+            cloned_tasks.append(app.initialize())
+            logger.info(f"Initialized cloned bot with token {bot['token']}")
         except Exception as e:
-            logger.error(f"Failed to auto-start bot {bot['token']}: {str(e)}")
+            logger.error(f"Failed to initialize bot {bot['token']}: {str(e)}")
     
-    await main_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Start all bots
+    await main_app.initialize()
+    await asyncio.gather(*cloned_tasks, return_exceptions=True)
+    
+    await main_app.start()
+    await asyncio.gather(*[app.start() for app in bot_instances.values() if app != main_app], return_exceptions=True)
+    
+    # Run the updater for the main bot (this keeps the loop alive)
+    await main_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # Keep the loop running until interrupted
+    try:
+        while True:
+            await asyncio.sleep(1)  # Keep the event loop alive
+    except KeyboardInterrupt:
+        logger.info("Shutting down all bots...")
+        await main_app.updater.stop()
+        await main_app.stop()
+        await asyncio.gather(*[app.stop() for app in bot_instances.values() if app != main_app], return_exceptions=True)
+        await main_app.shutdown()
+        await asyncio.gather(*[app.shutdown() for app in bot_instances.values() if app != main_app], return_exceptions=True)
 
-def main():
-    asyncio.run(run_main_app())
+async def main():
+    await run_all_bots()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
