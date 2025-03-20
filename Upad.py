@@ -21,7 +21,7 @@ bots_collection = db["bots"]
 # Constants
 MAIN_OWNER_ID = "1094941160"  # @h_oneysingh's Telegram ID
 LOG_GROUP_ID = -1002335903626  # Your log group ID
-MAIN_BOT_TOKEN = "7549968540:AAFqi_7DyheAzsM49_jSxQHMYvz0ynjjn7E"  # Valid token
+MAIN_BOT_TOKEN = "7891611632:AAGvB8rwJbhh7avJyCH0YhwbIPsp045wwtM"  # Valid token
 
 # Store runtime data
 user_data = {}
@@ -76,11 +76,23 @@ def cleanup_web_editor(ssh_client, chat_id):
     """Cleanup code-server and port forwarding"""
     try:
         if chat_id in port_forwards:
+            # Kill code-server process
             ssh_client.exec_command("pkill -f code-server")
             ssh_client.exec_command("rm -rf /tmp/code-server")
+            
+            # Terminate port forwarding
             if "process" in port_forwards[chat_id] and port_forwards[chat_id]["process"]:
-                port_forwards[chat_id]["process"].terminate()
-            port_forwards[chat_id]["thread"].join(timeout=2)
+                try:
+                    port_forwards[chat_id]["process"].terminate()
+                    port_forwards[chat_id]["process"].wait(timeout=5)
+                except Exception:
+                    port_forwards[chat_id]["process"].kill()
+            
+            # Ensure thread cleanup
+            if "thread" in port_forwards[chat_id]:
+                port_forwards[chat_id]["thread"].join(timeout=2)
+            
+            # Remove from tracking
             del port_forwards[chat_id]
     except Exception as e:
         logger.error(f"Cleanup error for {chat_id}: {str(e)}")
@@ -226,13 +238,29 @@ async def terminal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     command = update.message.text.strip()
     ssh_client = ssh_sessions[chat_id]
     
-    if command == "/exit":
+    if command.lower() == "/exit":
+        # Clean up web editor if it exists
         cleanup_web_editor(ssh_client, chat_id)
-        ssh_client.close()
-        del ssh_sessions[chat_id]
-        del user_data[chat_id]
-        bots_collection.update_one({"token": context.bot.token}, {"$unset": {f"ssh_sessions.{chat_id}": ""}})
-        await update.message.reply_text("Disconnected from the VPS. All resources cleaned up.")
+        
+        # Close SSH connection
+        try:
+            ssh_client.close()
+        except Exception as e:
+            logger.error(f"Error closing SSH client: {str(e)}")
+            
+        # Remove session data
+        if chat_id in ssh_sessions:
+            del ssh_sessions[chat_id]
+        if chat_id in user_data:
+            del user_data[chat_id]
+            
+        # Update MongoDB
+        bots_collection.update_one(
+            {"token": context.bot.token},
+            {"$unset": {f"ssh_sessions.{chat_id}": ""}}
+        )
+        
+        await update.message.reply_text("Disconnected from VPS. All resources cleaned up.")
         await log_to_group(context, f"User {update.effective_user.id} disconnected and cleaned up.")
         return ConversationHandler.END
     
@@ -410,13 +438,13 @@ async def run_all_bots():
     await main_app.start()
     await asyncio.gather(*[app.start() for app in bot_instances.values() if app != main_app], return_exceptions=True)
     
-    # Run the updater for the main bot (this keeps the loop alive)
+    # Run the updater for the main bot
     await main_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     
     # Keep the loop running until interrupted
     try:
         while True:
-            await asyncio.sleep(1)  # Keep the event loop alive
+            await asyncio.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down all bots...")
         await main_app.updater.stop()
